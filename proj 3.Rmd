@@ -1,0 +1,399 @@
+---
+title: "Data Project 3: Youtube Activity & Trending Videos Analysis"
+output: html_notebook
+---
+
+What makes a Youtube video go viral and how does that relate to what makes a Youtube video one that I would like?
+
+Data Sources: Google Takeout, Youtube API
+
+Exploratory Questions:
+- What types of videos do I watch? Which youtubers do I watch the most?
+- How does what I watch compare with what other people are watching (trending videos)?
+- How has my watch/search history and trending videos changed throughout the years? 
+- How much time do I spend on Youtube? Are there certain hours of the day I watch more often?
+
+Analysis
+- Sentiment Analysis: analyzing sentiment of descriptions and comments on different types of videos
+- Predictive Modeling: using category, sentiment, time of day, video length, etc. to predict video’s views, likes, comments
+
+
+
+
+```{r}
+library(stringr)
+library(rvest) 
+library(jsonlite) 
+library(tidytext)
+library(lubridate) 
+library(wordcloud)
+library(httr)
+library(ggplot2)
+
+library(stringr)
+library(dplyr)
+library(magrittr)
+library(readr)
+library(tidyr)
+```
+ 
+```{r}
+# READ SEARCH HISTORY
+search_history = read_html("Takeout/YouTube and YouTube Music/history/search-history.html")
+search = search_history %>%
+  html_nodes(".header-cell + .content-cell > a") %>%
+  html_text()
+search_content <- search_history %>%
+  html_nodes(".header-cell + .content-cell")
+search_time = str_match(search_content, "<br>(.*?)</div>")[,2]
+search_time = mdy_hms(search_time)
+
+# CREATING DATA FRAME SEARCH + TIMESTAMP
+search_df = data.frame(search = search, 
+                                time = search_time,
+                                stringsAsFactors = FALSE)
+search_df
+```
+
+
+```{r}
+library(tm)
+corp.original = VCorpus(VectorSource(search_df$search)) 
+corp = tm_map(corp.original, removePunctuation)
+corp = tm_map(corp, removeNumbers)
+corp = tm_map(corp, content_transformer(tolower), lazy=TRUE) 
+#corp = tm_map(corp, content_transformer(stemDocument), lazy=TRUE) 
+corp = tm_map(corp, content_transformer(removeWords), c("TIL") ,lazy=TRUE) 
+corp = tm_map(corp, stripWhitespace)
+corp = tm_map(corp, content_transformer(removeWords), c(stopwords("english")), lazy=TRUE)
+wordcloud(corp, colors=brewer.pal(11, "Set2"))
+```
+ 
+```{r}
+# READ WATCH HISTORY 
+watch_history <- read_html("Takeout/YouTube and YouTube Music/history/watch-history.html")
+watched_videocontent <-  watchHistory %>%
+  html_nodes(".header-cell + .content-cell")
+# POSSIBLE TIME CHARACTERS
+watch_time = str_match(watched_videocontent, 
+                             "<br>([A-Z].*)</div>")[,2]
+# POSSIBLE ID VALUES 
+watched_id = str_match(watched_videocontent, 
+                             "watch\\?v=([a-zA-Z0-9-_]*)")[,2]
+# VIDEO TITLE
+watched_titles = str_match(watched_videocontent, 
+                                "watch\\?v=[a-zA-Z0-9-_]*\">(.*?)</a>")[,2]
+
+# DATA FRAME WATCH HISTORY
+watched_df = data.frame(id = watched_id, 
+                                     title = watched_titles , 
+                                     time = watch_time, 
+                                     stringsAsFactors = FALSE)
+watched_df$time = mdy_hms(watched_df$time)
+
+watched_df = filter(watched_df, watched_df$time > '2021-01-01')
+watched_df = filter(watched_df, watched_df$time < '2021-05-01')
+watched_df
+```
+
+Data goes from December 12, 2020 - May 2, 2021. For consistency between months I filter out the December and May data, leaving 4 full months of data from January to April 2021.
+
+Preliminary Analysis of Watch Frequency
+```{r}
+#group by month
+watched_df$month = as.numeric(month(watched_df$time))
+
+watchbymonth <- watched_df %>%
+  group_by(month) %>%
+  tally()
+
+barplot(watchbymonth$n,ylab="Watch Count",main="Monthly Watch Frequency", names.arg=watchbymonth$month, col = "blue", las=1, cex.axis=.5, cex.names=1)
+
+#group by day
+watched_df$date = format(as.POSIXct(watched_df$time,format='%Y-%m-%d %H:%M:%S'),format='%m-%d-%Y')
+
+watchbydate <- watched_df %>%
+  group_by(date) %>%
+  tally()
+watchbydate$date = as.Date(watchbydate$date, "%m-%d-%Y")
+
+#plot watch frequency these past 4 months
+ggplot(data=watchbydate, aes(x=date, y=n, group=1)) +
+  geom_line()+
+  geom_point() + ylab("Watch Count") + ggtitle("My Youtube Activity Jan-Apr 2021") + xlab("Date")
+
+```
+Watch Timing
+```{r}
+#group by hour of day
+watched_df$hour = as.numeric(hour(watched_df$time))
+
+watchbyhour = watched_df %>%
+  group_by(hour) %>%
+  tally()
+
+barplot(watchbyhour$n,ylab="Watch Count",main="Hourly Watch Frequency", names.arg=watchbyhour$hour, col = "pink", las=1, cex.axis=.5, cex.names=.5)
+
+
+ggplot(watchbyhour, aes(x = hour, y=n)) +
+  geom_bar(width = 2, colour="grey",stat = "identity") +
+  theme_minimal() +
+  scale_fill_brewer() +
+  coord_polar(start=0) +
+  scale_x_continuous("", limits = c(0, 24), breaks = seq(0, 24), labels = seq(0,24)) + ggtitle("Watch Frequency by Time of day")
+```
+
+Most Rewatched
+```{r}
+install.packages("kableExtra")
+library(kableExtra)
+
+
+rewatched = watched_df %>%
+  group_by(id, title) %>% 
+  tally()
+
+rewatched = rewatched %>%
+  arrange(desc(n))
+rewatched = subset(rewatched, select = c(title,n)) 
+
+names(rewatched)[names(rewatched) == "n"] <- "watch count"
+
+rewatched_top3 = head(rewatched,3)
+
+rewatched_top3 %>%
+  kbl(caption = "Top 3 Rewatched Youtube Videos") %>%
+  kable_material(c("striped", "hover"))
+  
+```
+
+Video Preferences
+
+```{r}
+install.packages("tuber")
+install.packages("httpuv")
+library(tuber)
+library(httpuv)
+
+client_id = "1097085864260-i4hlng05dle65dfj4bllrombicngk1fd.apps.googleusercontent.com"
+client_secret = "T5xi7YFn8Vq3yfixD6w_8vrF"
+
+yt_oauth(app_id = client_id,
+         app_secret = client_secret,
+         token = '')
+```
+ 
+```{r}
+get_video_details(video_id="hLZX1gOF_64")
+
+unique_watched = unique(watched_df$id)
+
+get_all_stats <- function(id) {
+  get_stats(id)
+} 
+
+# Get stats and convert results to data frame 
+metadata = lapply(unique_watched, get_all_stats)
+metadata_df = do.call(rbind.fill, lapply(res, data.frame))
+metadata_df
+
+#
+watched_df = merge(x = watched_df, y = rewatched, by = "title")
+watched_df = merge(x = watched_df, y = metadata_df, by = "id")
+
+head(watched_df)
+```
+ 
+ Youtube Trending Analysis:
+ 
+ Trending vids data collected from Kaggle
+```{r}
+
+yt_trending = read_csv("UStrending.csv")
+yt_trending
+
+names(yt_trending)[names(yt_trending) == "video_id"] <- "id"
+
+#filter out only jan-apr 2021
+yt_trending = filter(yt_trending, yt_trending$trending_date > '2021-01-01')
+yt_trending 
+
+```
+
+```{r}
+library(plyr)
+library(dplyr)
+
+yt_trending$categoryId[which(yt_trending$categoryId == "24")] <- "Entertainment"
+yt_trending$categoryId[which(yt_trending$categoryId == "20")] <- "Gaming"
+yt_trending$categoryId[which(yt_trending$categoryId == "2")] <- "Autos & Vehicles"
+yt_trending$categoryId[which(yt_trending$categoryId == "23")] <- "Comedy"
+yt_trending$categoryId[which(yt_trending$categoryId == "10")] <- "Music"
+yt_trending$categoryId[which(yt_trending$categoryId == "2")] <- "Autos & Vehicles"
+yt_trending$categoryId[which(yt_trending$categoryId == "17")] <- "Sports"
+yt_trending$categoryId[which(yt_trending$categoryId == "25")] <- "News & Politics"
+yt_trending$categoryId[which(yt_trending$categoryId == "26")] <- "Howto & Style"
+yt_trending$categoryId[which(yt_trending$categoryId == "28")] <- "Science & Technology"
+yt_trending$categoryId[which(yt_trending$categoryId == "22")] <- "People & Blogs"
+yt_trending$categoryId[which(yt_trending$categoryId == "1")] <- "Film & Animation"
+yt_trending$categoryId[which(yt_trending$categoryId == "15")] <- "Pets & Animals"
+yt_trending$categoryId[which(yt_trending$categoryId == "27")] <- "Education"
+yt_trending$categoryId[which(yt_trending$categoryId == "29")] <- "Nonprofits & Activism"
+yt_trending$categoryId[which(yt_trending$categoryId == "19")] <- "Travel & Events"
+
+
+names(yt_trending)[names(yt_trending) == "categoryId"] <- "category"
+```
+
+
+Trending Videos I Watched
+```{r}
+#filter unique trending videos & # of times trending 
+unique_trending  = yt_trending  %>%
+  group_by(id, title, category, trending_date) %>% 
+  tally()
+unique_trending = unique_trending %>%
+  arrange(desc(n))
+
+names(unique_trending)[names(unique_trending) == "n"] <- "trending count"
+
+#filter unique watched videos
+unique_watched_df  = watched_df %>%
+  group_by(id, title) %>% 
+  tally()
+unique_watched_df
+names(unique_watched_df)[names(unique_watched_df) == "n"] <- "watch count"
+
+overlap_df = merge(x = unique_watched_df, y = unique_trending, by = "id")
+overlap_df 
+```
+
+Sentiment of video description
+```{r}
+library(tidytext)
+library(textdata)
+
+yt_trending_sent = yt_trending  %>% 
+  select(id, title, description) %>% 
+  unnest_tokens(word, description) %>%        
+  inner_join(get_sentiments("afinn")) %>%        
+  group_by(id) %>%      
+  summarise(emotion = mean(value))
+yt_trending_sent
+
+#merge with main df
+yt_trending = merge(x = yt_trending, y = yt_trending_sent, by = "id")
+
+#sentiment based on category
+cat_sent  = yt_trending %>%
+  group_by(category) %>% 
+  summarise(avg_sent = mean(emotion))
+
+cat_sent = cat_sent %>% arrange(desc(avg_sent))
+cat_sent
+
+yt_trending
+#sentiment over time
+sent_over_time = yt_trending %>%
+  group_by(trending_date, emotion) %>%
+  tally()
+
+sent_over_time = sent_over_time %>%
+  group_by(trending_date) %>%
+  summarise(daily_sent = mean(emotion))
+sent_over_time
+
+ggplot(data=sent_over_time, aes(x=trending_date, y=daily_sent, group=1)) +
+  geom_line()+
+  geom_point() + ylab("Daily Sentiment Score") + ggtitle("Public Sentiment From Youtube Trending") + xlab("Date")
+
+
+```
+
+Seeing what videos are in end of march
+```{r}
+yt_trending_mar = filter(yt_trending, yt_trending$trending_date > '2021-03-23')
+yt_trending_mar = filter(yt_trending_mar, yt_trending_mar$trending_date < '2021-04-01')
+yt_trending_mar = yt_trending_mar %>% arrange(emotion)
+yt_trending_mar
+```
+
+
+Correlation between views, likes, dislikes, comments, sentiment
+```{r}
+#install.packages("reshape2")
+library(reshape2)
+
+filter_corr =  yt_trending[, c('likes', 'dislikes', 'comment_count', 'view_count')]
+corr_mat <- cor(filter_corr )
+round(corr_mat, 2)
+
+melted_cormat = melt(corr_mat)
+melted_cormat
+
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(corr_mat){
+  corr_mat[lower.tri(corr_mat)]<- NA
+  return(corr_mat)
+}
+  
+upper_tri <- get_upper_tri(corr_mat)
+
+#corr matrix
+melted_cormat = melt(upper_tri, na.rm = TRUE)
+# Heatmap
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+```
+
+Overlap Trending Over Time
+```{r}
+
+overlap_cat = overlap_df %>% 
+  group_by(category) %>% 
+  tally() 
+
+overlap_cat = overlap_cat %>%
+  arrange(desc(n))
+
+overlap_cat
+
+overlap_df %>% 
+  ggplot(aes(x = trending_date, fill = category)) + 
+  labs(x= "Date", y= "Count") + 
+  ggtitle("Trending Videos 2021 Q1 I Watched")+
+  geom_area(stat = "bin")
+```
+
+
+
+Trending Over Time by Category
+```{r}
+#install.packages("ggthemes")
+library(ggthemes)
+
+trending_cat = yt_trending %>% 
+  group_by(category) %>% 
+  tally() 
+
+trending_cat = trending_cat %>%
+  arrange(desc(n))
+
+trending_cat
+
+yt_trending %>% 
+  ggplot(aes(x = trending_date, fill = category)) + 
+ labs(x= "Date", y= "Count") + 
+  ggtitle("Trending Videos 2021 Q1", "Most trending categories")+
+  geom_area(stat = "bin")
+```
+ 
+ 
